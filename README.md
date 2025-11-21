@@ -54,8 +54,8 @@ Instalação Local
 Clone o repositório
 
 bash
-git clone https://github.com/seu-usuario/b3-data-analyzer.git
-cd b3-data-analyzer
+git clone https://github.com/douglas2638/analise-b3.git
+cd analise-b3
 Crie um ambiente virtual
 
 bash
