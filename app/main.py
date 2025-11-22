@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.api.endpoints import router as api_router
@@ -9,6 +10,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.VERSION,
@@ -16,6 +18,28 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+@app.middleware("http")
+async def catch_json_errors(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except ValueError as e:
+        if "Out of range float values" in str(e):
+            logger.error(f"JSON serialization error in {request.url}: {e}")
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Erro interno de serialização de dados. Valores numéricos inválidos detectados."}
+            )
+        # Re-lançar outros erros ValueError
+        raise e
+    except Exception as e:
+        logger.error(f"Unexpected error in {request.url}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Erro interno do servidor"}
+        )
+
 
 # CORS
 app.add_middleware(

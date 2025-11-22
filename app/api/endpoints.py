@@ -6,18 +6,56 @@ from datetime import datetime, timedelta
 import asyncio
 import logging
 import time
+import math
+from typing import Any, Dict
 
 from app.services.data_collector import B3DataCollector
 from app.services.data_processor import DataProcessor
 from app.services.analyzer import StockAnalyzer
 from app.models.schemas import AnalysisRequest, AnalysisResult, PortfolioAnalysis
 
+def clean_json_data(data: Any) -> Any:
+    """
+    Remove valores NaN, inf, -inf para serialização JSON
+    """
+    if data is None:
+        return None
+    elif isinstance(data, (int, str, bool)):
+        return data
+    elif isinstance(data, float):
+        if math.isnan(data) or math.isinf(data):
+            return 0.0
+        return data
+    elif isinstance(data, (np.float32, np.float64, np.int32, np.int64)):
+        data_float = float(data)
+        if math.isnan(data_float) or math.isinf(data_float):
+            return 0.0
+        return data_float
+    elif isinstance(data, pd.Timestamp):
+        return data.isoformat()
+    elif isinstance(data, (list, tuple)):
+        return [clean_json_data(item) for item in data]
+    elif isinstance(data, dict):
+        return {key: clean_json_data(value) for key, value in data.items()}
+    elif hasattr(data, '__dict__'):
+        return clean_json_data(data.__dict__)
+    elif isinstance(data, pd.Series):
+        return clean_json_data(data.tolist())
+    elif isinstance(data, pd.DataFrame):
+        return clean_json_data(data.to_dict())
+    else:
+        try:
+            # Tenta converter para string como último recurso
+            return str(data)
+        except:
+            return None
+
 router = APIRouter()
 
 # Instâncias dos serviços
 data_collector = B3DataCollector()
 data_processor = DataProcessor()
-analyzer = StockAnalyzer(data_processor)
+analyzer = StockAnalyzer()
 
 # Cache em memória para otimização
 analysis_cache = {}
@@ -29,7 +67,7 @@ async def get_stock_data(
     period: str = Query("6mo", description="Período: 1d, 5d, 1mo, 3mo, 6mo, 1y"),
     include_indicators: bool = Query(False, description="Incluir indicadores técnicos"),
     use_cache: bool = Query(True, description="Usar cache para evitar rate limiting")
-    # REMOVA max_retries daqui - não é mais suportado
+    
 ):
     """Busca dados históricos de uma ação com rate limiting"""
     try:
@@ -170,17 +208,17 @@ async def analyze_stock(
         if use_cache and cache_key in analysis_cache:
             cached_result = analysis_cache[cache_key]
             cache_age = datetime.now() - cached_result['timestamp']
-            if cache_age < timedelta(minutes=15):  # Cache de 15 minutos para análises
+            if cache_age < timedelta(minutes=15):
                 logger.info(f"Retornando análise do cache para {request.symbol}")
                 return AnalysisResult(**cached_result['data'])
         
-        # Busca dados com período padrão seguro
-        data = data_collector.get_stock_data(request.symbol, "6mo")  # Período menor para evitar rate limiting
+        # Busca dados
+        data = data_collector.get_stock_data(request.symbol, "6mo")
         
         if data.empty:
             raise HTTPException(
                 status_code=404, 
-                detail=f"Dados não encontrados para {request.symbol}. Yahoo Finance pode estar com rate limiting."
+                detail=f"Dados não encontrados para {request.symbol}."
             )
         
         # Filtra por período se especificado
@@ -197,27 +235,46 @@ async def analyze_stock(
                     )
             except Exception as e:
                 logger.warning(f"Erro ao filtrar por período: {e}")
-                # Continua com todos os dados se houver erro na filtragem
         
         # Realiza análise
         analysis = analyzer.analyze_stock(request.symbol, data)
         
+        if 'error' in analysis:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Erro na análise: {analysis['error']}"
+            )
+        
+        statistics_data = analysis.get('statistics', {})
+        
+        # Preenche campos faltantes com valores padrão
+        required_stats = ['var_95', 'cvar_95']
+        for field in required_stats:
+            if field not in statistics_data:
+                statistics_data[field] = 0.0
+        
         # Prepara resposta
-        result = AnalysisResult(
-            symbol=analysis['symbol'],
-            period=f"{request.start_date} to {request.end_date}" if request.start_date and request.end_date else "6mo",
-            statistics=analysis.get('statistics', {}),
-            indicators=analysis.get('indicators', {}),
-            recommendations=analysis.get('recommendations', []),
-            score=analysis.get('score', 50)
-        )
+        result_data = {
+            "symbol": analysis['symbol'],
+            "period": f"{request.start_date} to {request.end_date}" if request.start_date and request.end_date else "6mo",
+            "statistics": statistics_data,
+            "indicators": analysis.get('indicators', {}),
+            "recommendations": analysis.get('recommendations', []),
+            "score": analysis.get('score', 50),
+            "trend_analysis": analysis.get('trend_analysis'),
+            "timestamp": analysis.get('timestamp', datetime.now().isoformat())
+        }
+        
+        cleaned_data = clean_json_data(result_data)
+        
+        result = AnalysisResult(**cleaned_data)
         
         # Adiciona ao cache em background
         if use_cache:
             background_tasks.add_task(
                 update_analysis_cache, 
                 cache_key, 
-                result.dict()
+                cleaned_data
             )
         
         return result
@@ -294,72 +351,56 @@ async def quick_analyze(
 
 @router.get("/portfolio/analyze")
 async def analyze_portfolio(
-    stocks: List[str] = Query(..., description="Lista de ações (ex: PETR4,VALE3,ITUB4)"),
-    weights: Optional[List[float]] = Query(None, description="Pesos da carteira"),
-    initial_investment: float = Query(10000.0, description="Investimento inicial"),
-    use_cache: bool = Query(True, description="Usar cache"),
-    max_stocks: int = Query(5, description="Máximo de ações para análise", ge=1, le=10)
+    stocks: str = Query(..., description="Ações separadas por vírgula"),
+    weights: Optional[str] = Query(None, description="Pesos separados por vírgula")
 ):
-    """Análise de carteira de ações com rate limiting"""
+    
     try:
-        if not stocks:
-            raise HTTPException(status_code=400, detail="Lista de ações não pode estar vazia")
+        # Parse simples
+        stock_list = [s.strip().upper() for s in stocks.split(',') if s.strip()]
         
-        # Limita número de ações para evitar rate limiting
-        stocks = stocks[:max_stocks]
+        if weights:
+            weight_list = [float(w.strip()) for w in weights.split(',') if w.strip()]
+        else:
+            weight_list = [1.0/len(stock_list)] * len(stock_list)
         
-        if weights and len(weights) != len(stocks):
-            raise HTTPException(status_code=400, detail="Número de pesos não corresponde ao número de ações")
+        # Validação básica
+        if len(weight_list) != len(stock_list):
+            return {"error": "Número de pesos não corresponde ao número de ações"}
         
-        if not weights:
-            weights = [1/len(stocks)] * len(stocks)
+        # Coleta dados básica
+        analyses = {}
+        for symbol in stock_list:
+            try:
+                data = data_collector.get_stock_data(symbol, "3mo")
+                if not data.empty:
+                    # Análise simplificada
+                    current_price = float(data['Close'].iloc[-1])
+                    analyses[symbol] = {
+                        "symbol": symbol,
+                        "current_price": current_price,
+                        "data_points": len(data),
+                        "analysis": "Dados coletados com sucesso"
+                    }
+            except:
+                analyses[symbol] = {"error": "Falha na coleta de dados"}
         
-        # Verifica se pesos somam 1
-        if abs(sum(weights) - 1.0) > 0.01:
-            weights = [w/sum(weights) for w in weights]
-        
-        # Verifica cache
-        cache_key = f"portfolio_{'_'.join(sorted(stocks))}_{initial_investment}"
-        if use_cache and cache_key in analysis_cache:
-            cached = analysis_cache[cache_key]
-            if datetime.now() - cached['timestamp'] < timedelta(minutes=30):
-                return cached['data']
-        
-        logger.info(f"Iniciando análise de carteira com {len(stocks)} ações")
-        
-        # Coleta dados com rate limiting embutido
-        stocks_data = data_collector.get_multiple_stocks(stocks, "6mo")
-        
-        if not stocks_data:
-            raise HTTPException(
-                status_code=404, 
-                detail="Nenhum dado encontrado para as ações especificadas. Yahoo Finance pode estar com rate limiting."
-            )
-        
-        # Análise individual e da carteira
-        portfolio_analysis = await _analyze_portfolio_comprehensive(stocks_data, weights, initial_investment)
-        
-        portfolio_analysis["rate_limiting_note"] = "Análise limitada a 5 ações para evitar rate limiting"
-        portfolio_analysis["cached"] = False
-        
-        # Adiciona ao cache
-        if use_cache:
-            analysis_cache[cache_key] = {
-                'data': portfolio_analysis,
-                'timestamp': datetime.now()
+        # Resultado simplificado
+        result = {
+            "stocks": stock_list,
+            "weights": weight_list,
+            "analyses": analyses,
+            "portfolio_summary": {
+                "total_stocks": len(stock_list),
+                "analysis_timestamp": datetime.now().isoformat()
             }
-            portfolio_analysis["cached"] = True
+        }
         
-        return portfolio_analysis
+        # Limpeza final garantida
+        return clean_json_data(result)
         
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Erro em /portfolio/analyze: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Erro na análise de carteira: {str(e)}"
-        )
+        return clean_json_data({"error": f"Erro seguro: {str(e)}"})
 
 @router.get("/market/overview")
 async def market_overview(

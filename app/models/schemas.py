@@ -42,6 +42,7 @@ class TrendAnalysis(BaseModel):
     trend_strength: float
     key_levels: Dict[str, float]
 
+# CORREÇÃO: Statistics com campos opcionais
 class Statistics(BaseModel):
     price_current: float
     price_variation_1d: float
@@ -50,8 +51,8 @@ class Statistics(BaseModel):
     annual_volatility: float
     sharpe_ratio: float
     max_drawdown: float
-    var_95: float
-    cvar_95: float
+    var_95: Optional[float] = Field(None, description="Value at Risk 95%")  # ← OPCIONAL
+    cvar_95: Optional[float] = Field(None, description="Conditional Value at Risk 95%")  # ← OPCIONAL
     volume: Dict[str, Any]
 
 class AnalysisResult(BaseModel):
