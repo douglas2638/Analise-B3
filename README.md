@@ -1,25 +1,16 @@
-# 📊 Análise B3 Profissional (Python)
+# 📊 Análise B3 – Projeto Profissional (Versão Estável)
 
-Projeto de portfólio focado em empregabilidade: dados reais, séries temporais, indicadores técnicos, **backtesting** e **dashboard executivo**.
+Projeto completo em Python para análise do mercado financeiro brasileiro,
+com estratégia técnica avançada, gestão de risco e painel administrativo.
 
-## ✅ O que este projeto entrega
-- Coleta de dados históricos reais (Yahoo Finance via `yfinance`) para tickers da B3 (ex.: `PETR4.SA`)
-- Pré-processamento de séries temporais (retornos, normalizações)
-- Indicadores técnicos: SMA, EMA, RSI, volatilidade
-- Estratégia exemplo baseada em RSI
-- Backtest com métricas executivas:
-  - Retorno total
-  - Drawdown máximo
-  - Taxa de acerto
-  - Sharpe (diário)
-- Dashboard (Streamlit + Plotly) com KPIs e gráficos
+## Funcionalidades
+- Seleção de período de análise
+- Estratégia: Média Móvel + RSI + Estocástico
+- Stop Loss e Take Profit
+- Backtesting com gestão de risco (índice normalizado)
+- KPIs executivos: Retorno, Drawdown, Stop, Take
+- Dashboard administrativo (Streamlit)
 
-## 🚀 Como executar (Windows)
-```bash
-cd Analise-B3
+## Execução
 pip install -r requirements.txt
 streamlit run app/dashboard.py
-```
-
-## 📌 Observação
-Projeto educacional/analítico. Não é recomendação de investimento.
